@@ -1,14 +1,16 @@
 import numpy as np
-import cupy as xp
+import cupy as cp
 from gwp import util
 from gwp import usfft
+import matplotlib.pyplot as plt
+import dxchange
 
 
 class Solver():
     """...
     """
 
-    def __init__(self, n, nangles, alpha, beta, os, eps):
+    def __init__(self, n, nangles, alpha, beta, eps):
         """
         """
         # init box parameters for covering the spectrum (see paper)
@@ -16,111 +18,143 @@ class Solver():
         K = 3*nf_start
         step = (nf_start+1)/(K-1)
         nf = 2**(nf_start-range(K)*step)
+        if K == 0:
+            nf = np.array([0.5])
+            K = 1
         xi_cent = n/nf/(2*np.pi)
+        # make sure multiplication by 2 of xi_cent gives int to have aligned boxes
+        xi_cent = np.int32(xi_cent*2)/2
         lam1 = 4*np.log(2)*(xi_cent*alpha)*(xi_cent*alpha)
         lam2 = lam1/(beta*beta)
         lam3 = lam1/(beta*beta)
         lambda1 = np.pi**2/lam1
         lambda2 = np.pi**2/lam2
         lambda3 = np.pi**2/lam3
-        K1 = np.round(np.sqrt(-np.log(eps)/lambda1))
-        K2 = np.round(np.sqrt(-np.log(eps)/lambda2))
-        K3 = np.round(np.sqrt(-np.log(eps)/lambda3))
-        L1 = 4*np.int32(os/2.0*K1)
-        L2 = 4*np.int32(os/2.0*K2)
-        L3 = 4*np.int32(os/2.0*K3)
-        xi_cent = np.int32(xi_cent*os)/os
+
+        # box sizes in the frequency domain
+        L1 = 4*np.int32(np.round(np.sqrt(-np.log(eps)/lambda1)))
+        L2 = 4*np.int32(np.round(np.sqrt(-np.log(eps)/lambda2)))
+        L3 = 4*np.int32(np.round(np.sqrt(-np.log(eps)/lambda3)))
         boxshape = np.array([L3, L2, L1]).swapaxes(0, 1)
 
         # init Lebedev's sphere to cover the spectrum
         leb = util.take_sphere(nangles)
 
-        # box grid
-        x = (np.arange(-L1[-1]//2, L1[-1]//2) + np.int32(xi_cent[-1]*os))/os
-        y = (np.arange(-L2[-1]//2, L2[-1]//2))/os
-        z = (np.arange(-L3[-1]//2, L3[-1]//2))/os
-        [x, y, z] = np.meshgrid(x, y, z)
-        x = xp.array([x.flatten(), y.flatten(), z.flatten()]).swapaxes(0, 1)
+        # box grid in space
+        x = ((cp.arange(-L1[-1]//2, L1[-1]//2))/2 + xi_cent[-1])
+        y = ((cp.arange(-L2[-1]//2, L2[-1]//2))/2)
+        z = ((cp.arange(-L3[-1]//2, L3[-1]//2))/2)
+        [z, y, x] = cp.meshgrid(z, y, x, indexing='ij')
+        x = cp.array([z.flatten(), y.flatten(),
+                      x.flatten()]).astype('float32').swapaxes(0, 1)
+
+        # global grid in space
+        xg = cp.arange(-n, n)
+        yg = cp.arange(-n, n)
+        zg = cp.arange(-n, n)
+        [zg, yg, xg] = np.meshgrid(zg, yg, xg, indexing='ij')
+        xg = cp.array([zg.flatten(), yg.flatten(),
+                       xg.flatten()]).astype('float32').swapaxes(0, 1)
 
         # init gaussian wave-packet basis for each layer
         gwpf = [None]*K
         for k in range(K):
-            xn = (-L1[k]/2+xp.int32(xi_cent[k]*os) +
-                  xp.arange(L1[k]))/os-xi_cent[k]
-            yn = (-L2[k]/2+xp.arange(L2[k]))/os
-            zn = (-L3[k]/2+xp.arange(L3[k]))/os
-            [xn, yn, zn] = xp.meshgrid(xn, yn, zn)
-            gwpf[k] = xp.exp(-lambda1[k]*xn*xn-lambda2[k] *
-                             yn*yn-lambda3[k]*zn*zn).flatten()
+            xn = (cp.arange(-L1[k]/2, L1[k]/2))/2
+            yn = (cp.arange(-L2[k]/2, L2[k]/2))/2
+            zn = (cp.arange(-L3[k]/2, L3[k]/2))/2
+            [zn, yn, xn] = cp.meshgrid(zn, yn, xn, indexing='ij')
+            gwpf[k] = cp.exp(-lambda1[k]*xn*xn-lambda2[k] *
+                             yn*yn-lambda3[k]*zn*zn)
+            gwpf[k] = gwpf[k].astype('float32').flatten()
 
-        # find grid index for extracting boxes on layers>1 (small ones) from the box on the the last layer (big box)
+        # find grid index for extracting boxes on layers>1 (small ones)
+        # from the box on the the last layer (large box)
         inds = [None]*K
         for k in range(K):
-            xi_centk = np.int32(xi_cent[k]*os)
-            xi_centK = np.int32(xi_cent[-1]*os)
+            xi_centk = np.int32(xi_cent[k]*2)
+            xi_centK = np.int32(xi_cent[-1]*2)
             xst = xi_centk-L1[k]//2+L1[-1]//2-xi_centK
             yst = -L2[k]//2+L2[-1]//2
             zst = -L3[k]//2+L3[-1]//2
-            indsx, indsy, indsz = xp.mgrid[xst:xst +
-                                           L1[k], yst:yst+L2[k], zst:zst+L3[k]]
-            inds[k] = (indsx+indsy*L1[-1]+indsz*L1[-1]*L2[-1]).flatten()
+            indsz, indsy, indsx = cp.meshgrid(cp.arange(zst, zst+L3[k]),
+                                              cp.arange(yst, yst+L2[k]),
+                                              cp.arange(xst, xst+L1[k]))
+            inds[k] = (indsx+indsy*L1[-1]+indsz*L1[-1] *
+                       L2[-1]).astype('int32').flatten()
 
         # 3d USFFT plan
         U = usfft.Usfft(n, eps)
 
-        self.x = x
+        print('number of levels:', K)
+        for k in range(K):
+            print('box size on level', k, ':', boxshape[k])
+            print('box center on level', k, ':', xi_cent[k])
+
         self.U = U
         self.nangles = nangles
         self.n = n
+        self.boxshape = boxshape
         self.K = K
         self.leb = leb
+        self.x = x
+        self.xg = xg
         self.gwpf = gwpf
         self.inds = inds
-        self.boxshape = boxshape
 
     def fwd(self, f):
         """Forward operator for GWP decomposition
         """
         # compensate for the USFFT kernel function in the space domain and apply 3D FFT
-        F = self.U.compfft(xp.array(f))
+        F = self.U.compfft(cp.array(f))
 
         # find coefficients for each angle
         coeffs = [None]*self.K
+        for k in range(self.K):
+            coeffs[k] = np.zeros(
+                [self.nangles, *self.boxshape[k]], dtype='complex64')
         for ang in range(self.nangles):
             print('angle', ang)
             # rotate box on the last layer
             xr = util.rotate(self.x, self.leb[ang])
+            xr /= self.n  # switch to [-1/2,1/2) interval w.r.t. global grid
             # gather value to the box grid on the last layer
-            g = self.U.gather(F, xr)
+            g = cp.zeros(int(np.prod(self.boxshape[-1])), dtype="complex64")
+            g = self.U.gather(F, xr, g)
             # find coefficients on each box
             for k in range(self.K):
                 # broadcast values to smaller boxes, multiply by the gwp kernel function
                 fcoeffs = self.gwpf[k]*g[self.inds[k]]
+                fcoeffs = fcoeffs.reshape(self.boxshape[k])
                 # ifft on the box
-                coeffs[k] = self.U.checkerboard(xp, xp.fft.ifftn(
-                    self.U.checkerboard(xp, fcoeffs.reshape(self.boxshape[k]))), inverse=True)
+                fcoeffs = util.checkerboard(cp.fft.ifftn(
+                    util.checkerboard(fcoeffs), norm='ortho'), inverse=True)
+                coeffs[k][ang] = fcoeffs.get()
+
         return coeffs
 
     def adj(self, coeffs):
         """Adjoint operator for GWP decomposition
         """
         # build spectrum by using gwp coefficients
-        F = xp.zeros([(2 * self.n)**3], dtype="complex64")
+        F = cp.zeros([(2 * self.n)**3], dtype="complex64")
         for ang in range(self.nangles):
             print('angle', ang)
-            print(int(np.prod(self.boxshape[-1])))
-            g = xp.zeros(int(np.prod(self.boxshape[-1])), dtype='complex64')
+            g = cp.zeros(int(np.prod(self.boxshape[-1])), dtype='complex64')
             for k in range(self.K):
-                # fft on the box
-                fcoeffs = self.U.checkerboard(xp, xp.fft.fftn(self.U.checkerboard(
-                    xp, coeffs[k].reshape(self.boxshape[k]))), inverse=True)
+                fcoeffs = cp.array(coeffs[k][ang])
+                # fft on the box                
+                fcoeffs = util.checkerboard(cp.fft.fftn(
+                    util.checkerboard(fcoeffs), norm='ortho'), inverse=True)
                 # broadcast values to smaller boxes, multiply by the gwp kernel function
                 g[self.inds[k]] += self.gwpf[k]*fcoeffs.flatten()
+            g = g.reshape(self.boxshape[-1])
             # rotate box on the last layer
-            xr = util.rotate(self.x, self.leb[ang])
-            # scatter values from the box grid on the last layer
-            print('scatter', g.shape, F.shape)
-            F = self.U.scatter(g, -xr, F)  # sign change for adjoint FFT
+            xr = util.rotate(self.xg, self.leb[ang], reverse=True)
+            xr /= cp.array(self.boxshape[k])  # switch to [-1/2,1/2) interval w.r.t. box
+            # gather values from the box grid to the global grid
+            F = self.U.gather(g, -xr, F)  # sign change for adjoint FFT
+        dxchange.write_tiff(F.reshape([2 * self.n] * 3).get().real, 'data/F')
         # apply 3D FFT, compensate for the USFFT kernel function in the space domain
-        f = self.U.fftcomp(F.reshape([2 * self.n] * 3))
+        f = self.U.fftcomp(
+            F.reshape([2 * self.n] * 3)).get().astype('complex64')
         return f

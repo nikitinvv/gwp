@@ -1,5 +1,5 @@
-import cupy as xp
 import numpy as np
+import cupy as cp
 import os
 import struct
 
@@ -21,15 +21,35 @@ def take_sphere(nangles):
     
     return leb
 
-def rotate(x, leb):
+def rotate(x, leb, reverse=True):
     """Rotate coordinates with respect to a point on Lebedev's sphere
     """
     phi = np.arctan2(-leb[0],leb[1])
-    R = np.array([[leb[0], xp.cos(phi), -leb[2]*xp.sin(phi)],\
-                [leb[1], xp.sin(phi),  leb[2]*xp.cos(phi)], \
-                [leb[2], 0.0, leb[0]*xp.sin(phi)-leb[1]*xp.cos(phi)]])        
-    xr = xp.zeros(x.shape, dtype='float32')                
-    xr[:,0] = R[0,0]*x[:,0] + R[0,1]*x[:,1] + R[0,2]*x[:,2]
-    xr[:,1] = R[1,0]*x[:,0] + R[1,1]*x[:,1] + R[1,2]*x[:,2]
-    xr[:,2] = R[2,0]*x[:,0] + R[2,1]*x[:,1] + R[2,2]*x[:,2]
+    R = np.array([[leb[0], cp.cos(phi), -leb[2]*cp.sin(phi)],\
+                [leb[1], cp.sin(phi),  leb[2]*cp.cos(phi)], \
+                [leb[2], 0.0, leb[0]*cp.sin(phi)-leb[1]*cp.cos(phi)]])  
+    if(reverse):
+        R = R.swapaxes(0,1)      
+    xr = cp.zeros(x.shape, dtype='float32')                
+    xr[:,2] = R[0,0]*x[:,2] + R[0,1]*x[:,1] + R[0,2]*x[:,0]
+    xr[:,1] = R[1,0]*x[:,2] + R[1,1]*x[:,1] + R[1,2]*x[:,0]
+    xr[:,0] = R[2,0]*x[:,2] + R[2,1]*x[:,1] + R[2,2]*x[:,0]
     return xr
+
+def checkerboard(array, inverse=False):
+    """In-place FFTshift for even sized grids only.
+    If and only if the dimensions of `array` are even numbers, flipping the
+    signs of input signal in an alternating pattern before an FFT is equivalent
+    to shifting the zero-frequency component to the center of the spectrum
+    before the FFT.
+    """
+    def g(x):
+        return 1 - 2 * (x % 2)
+
+    for i in range(3):
+        array = cp.moveaxis(array, i, -1)
+        array *= g(cp.arange(array.shape[-1]) + 1)
+        if inverse:
+            array *= g(array.shape[-1] // 2)
+        array = cp.moveaxis(array, -1, i)
+    return array

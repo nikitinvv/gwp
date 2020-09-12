@@ -1,5 +1,6 @@
-import cupy as xp # gpu version
-# import numpy as xp # cpu version
+import cupy as cp
+import numpy as np
+from gwp import util
 
 class Usfft():
     """Provides unequally-spaced fast fourier transforms (USFFT).
@@ -8,90 +9,80 @@ class Usfft():
     transforms for those two cases. The inverse Fourier transforms may be created
     by negating the frequencies on the non-uniform grid. 
     """
-    
+
     def __init__(self, n, eps):
         # parameters for the USFFT transform
-        mu = -xp.log(eps) / (2 * n**2)
-        Te = 1 / xp.pi * xp.sqrt(-mu * xp.log(eps) + (mu * n)**2 / 4)
-        m = xp.int(xp.ceil(2 * n * Te))
-        # smearing kernel 
-        xeq = xp.mgrid[-n//2:n//2, -n//2:n//2, -n//2:n//2]
-        kernel = xp.exp(-mu * xp.sum(xeq**2, axis=0)).astype('float32')
+        mu = -np.log(eps) / (2 * n**2)
+        Te = 1 / np.pi * np.sqrt(-mu * np.log(eps) + (mu * n)**2 / 4)
+        m = np.int(np.ceil(2 * n * Te))
+        # smearing kernel
+        xeq = cp.mgrid[-n//2:n//2, -n//2:n//2, -n//2:n//2]
+        kernel = cp.exp(-mu * cp.sum(xeq**2, axis=0)).astype('float32')
         # smearing constants
-        cons = [xp.sqrt(xp.pi / mu)**3, -xp.pi**2 / mu]
+        cons = [np.sqrt(np.pi / mu)**3, -np.pi**2 / mu]
 
         self.n = n
         self.mu = mu
         self.m = m
         self.kernel = kernel
         self.cons = cons
-            
-    def gather(self, Fe, x):
+
+    def gather(self, Fe, x, F):
         """Gather F from the regular grid.
         Parameters
         ----------
-        Fe : [2 * n] * 3 complex64
+        Fe : [N1,N2,N3] complex64
             Function at equally spaced frequencies.
-        x : (N, 3) float32
+        x : (K, 3) float32
             Non-uniform frequencies.
+        F : (K, ) complex64
+            Init values at the non-uniform frequencies.
         Returns
         -------
-        F : (N, ) complex64
+        F : (K, ) complex64
             Values at the non-uniform frequencies.
-        """        
-        
-        F = xp.zeros(x.shape[0], dtype="complex64")
-        ell = ((2 * self.n * x) // 1).astype(xp.int32)  # nearest grid to x
-        for i0 in range(-self.m, self.m):
-            delta0 = self._delta(ell[:, 0], i0, x[:, 0])
-            for i1 in range(-self.m, self.m):
-                delta1 = self._delta(ell[:, 1], i1, x[:, 1])
-                for i2 in range(-self.m, self.m):
-                    delta2 = self._delta(ell[:, 2], i2, x[:, 2])
-                    Fkernel = self.cons[0] * xp.exp(self.cons[1] * (delta0 + delta1 + delta2))
-                    F += Fe[(self.n + ell[:, 0] + i0) % (2 * self.n),
-                            (self.n + ell[:, 1] + i1) % (2 * self.n),
-                            (self.n + ell[:, 2] + i2) % (2 * self.n)] * Fkernel
-        return F
-    
-    def scatter(self, f, x, G):
-        """Scatter f to the regular grid.
-        Parameters
-        ----------
-        f : (N, ) complex64
-            Values at non-uniform frequencies.
-        x : (N, 3) float32
-            Non-uniform frequencies.
-        G : [2 * n] * 3 complex64
-            Init function at equally spaced frequencies.
-        Return
-        ------
-            G : [2 * n] * 3 complex64
-            Function at equally spaced frequencies.
         """
-
-        ell = ((2 * self.n * x) // 1).astype(xp.int32)  # nearest grid to x
-        stride = ((2 * self.n)**2, 2 * self.n)
-        for i0 in range(-self.m, self.m):
-            delta0 = self._delta(ell[:, 0], i0, x[:, 0])
-            for i1 in range(-self.m, self.m):
-                delta1 = self._delta(ell[:, 1], i1, x[:, 1])
-                for i2 in range(-self.m, self.m):
-                    delta2 = self._delta(ell[:, 2], i2, x[:, 2])
-                    Fkernel = self.cons[0] * xp.exp(self.cons[1] * (delta0 + delta1 + delta2))
-                    ids = (           ((self.n + ell[:, 2] + i2) % (2 * self.n))
-                        + stride[1] * ((self.n + ell[:, 1] + i1) % (2 * self.n))
-                        + stride[0] * ((self.n + ell[:, 0] + i0) % (2 * self.n))
-                    )  # yapf: disable
-                    vals = f * Fkernel
-                    # accumulate by indexes (with possible index intersections),
-                    # TODO acceleration of bincount!!
-                    vals = (xp.bincount(ids, weights=vals.real) +
-                            1j * xp.bincount(ids, weights=vals.imag))
-                    ids = xp.nonzero(vals)[0]
-                    G[ids] += vals[ids]
-        return G
-
+        n = Fe.shape
+        m = self.m
+        
+        # skip points that are too far from the global grid
+        ell = (np.round(cp.array(n) * x) ).astype(np.int32)  # nearest grid to x
+        cond_out = cp.where((ell[:, 0]+n[0]//2+m >= 0) *\
+            (ell[:, 1]+n[1]//2+m >= 0) *\
+            (ell[:, 2]+n[2]//2+m >= 0) *\
+            (ell[:, 0]+n[0]//2-m < n[0]) *\
+            (ell[:, 1]+n[1]//2-m < n[1]) *\
+            (ell[:, 2]+n[2]//2-m < n[2]))[0]
+        ell = ell[cond_out]
+        x = x[cond_out]
+        Fc = F[cond_out]
+        
+        # gathering over 3 axes
+        for i0 in range(-m, m):
+            id0 = (n[0]//2 + ell[:, 0] + i0)
+            cond0 = (id0 >= 0)*(id0 < n[0])  # check index z
+            for i1 in range(-m, m):
+                id1 = (n[1]//2 + ell[:, 1] + i1)
+                cond1 = (id1 >= 0)*(id1 < n[1])  # check index y
+                for i2 in range(-m, m):
+                    id2 = (n[2]//2 + ell[:, 2] + i2)
+                    cond2 = (id2 >= 0)*(id2 < n[2])  # check index x
+                    # take index inside the global grid
+                    cond = cp.where(cond0*cond1*cond2)[0]
+                    id0 = id0[cond]
+                    id1 = id1[cond]
+                    id2 = id2[cond]
+                    # compute weights
+                    delta0 = ((ell[cond, 0] + i0) / (n[0]) - x[cond, 0])**2
+                    delta1 = ((ell[cond, 1] + i1) / (n[1]) - x[cond, 1])**2
+                    delta2 = ((ell[cond, 2] + i2) / (n[2]) - x[cond, 2])**2
+                    Fkernel = self.cons[0] * \
+                        cp.exp(self.cons[1] * (delta0 + delta1 + delta2))
+                    # gather
+                    Fc[cond] += Fe[id0, id1, id2] * Fkernel
+        F[cond_out] += Fc
+        return F
+        
     def compfft(self, f):
         """Compesantion for smearing, followed by FFT
         Parameters
@@ -104,11 +95,13 @@ class Usfft():
             Fourier transform at equally-spaced frequencies
         """
 
-        fe = xp.zeros([2 * self.n] * 3, dtype="complex64")
-        fe[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n//2:3*self.n//2] = f / ((2 * self.n)**3 * self.kernel)
-        Fe = self.checkerboard(xp, xp.fft.fftn(self.checkerboard(xp, fe)), inverse=True)
+        fe = cp.zeros([2 * self.n] * 3, dtype="complex64")
+        fe[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
+            2:3*self.n//2] = f / ((2 * self.n)**3 * self.kernel)
+        Fe = util.checkerboard(cp.fft.fftn(
+            util.checkerboard(fe)), inverse=True)
         return Fe
-    
+
     def fftcomp(self, G):
         """FFT followed by compesantion for smearing
         Parameters
@@ -120,35 +113,11 @@ class Usfft():
         f : [n] * 3 complex64
             Function at equally-spaced coordinates        
         """
-
-        F = self.checkerboard(xp, xp.fft.fftn(self.checkerboard(xp, G)), inverse=True)
-        F = F[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n//2:3*self.n//2] / ((2 * self.n)**3 * self.kernel)
+        F = util.checkerboard(cp.fft.fftn(
+            util.checkerboard(G)), inverse=True)
+        F = F[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
+              2:3*self.n//2] / ((2 * self.n)**3 * self.kernel)
         return F
 
-    def checkerboard(self, xp, array, inverse=False):
-        """In-place FFTshift for even sized grids only.
-        If and only if the dimensions of `array` are even numbers, flipping the
-        signs of input signal in an alternating pattern before an FFT is equivalent
-        to shifting the zero-frequency component to the center of the spectrum
-        before the FFT.
-        """
-        def g(x):
-            return 1 - 2 * (x % 2)
-
-        for i in range(3):
-            if array.shape[i] % 2 != 0:
-                raise ValueError(
-                    "Can only use checkerboard algorithm for even dimensions. "
-                    f"This dimension is {array.shape[i]}.")
-            array = xp.moveaxis(array, i, -1)
-            array *= g(xp.arange(array.shape[-1]) + 1)
-            if inverse:
-                array *= g(array.shape[-1] // 2)
-            array = xp.moveaxis(array, -1, i)
-        return array
-
-    def _delta(self, l, i, x):
-        return ((l + i).astype('float32') / (2 * self.n) - x)**2
-
-
-  
+    # def _delta(self, l, i, x):
+    #     return ((l + i).astype('float32') / (2 * self.n) - x)**2
