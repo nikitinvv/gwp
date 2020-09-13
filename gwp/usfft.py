@@ -69,9 +69,6 @@ class Usfft():
                     cond2 = (id2 >= 0)*(id2 < n[2])  # check index x
                     # take index inside the global grid
                     cond = cp.where(cond0*cond1*cond2)[0]
-                    id0 = id0[cond]
-                    id1 = id1[cond]
-                    id2 = id2[cond]
                     # compute weights
                     delta0 = ((ell[cond, 0] + i0) / (n[0]) - x[cond, 0])**2
                     delta1 = ((ell[cond, 1] + i1) / (n[1]) - x[cond, 1])**2
@@ -79,7 +76,7 @@ class Usfft():
                     Fkernel = self.cons[0] * \
                         cp.exp(self.cons[1] * (delta0 + delta1 + delta2))
                     # gather
-                    Fc[cond] += Fe[id0, id1, id2] * Fkernel
+                    Fc[cond] += Fe[id0[cond], id1[cond], id2[cond]] * Fkernel
         F[cond_out] += Fc
         return F
         
@@ -99,10 +96,10 @@ class Usfft():
         fe[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
             2:3*self.n//2] = f / ((2 * self.n)**3 * self.kernel)
         Fe = util.checkerboard(cp.fft.fftn(
-            util.checkerboard(fe)), inverse=True)
+            util.checkerboard(fe), norm='ortho'), inverse=True)
         return Fe
 
-    def fftcomp(self, G):
+    def ifftcomp(self, G):
         """FFT followed by compesantion for smearing
         Parameters
         ----------
@@ -113,8 +110,8 @@ class Usfft():
         f : [n] * 3 complex64
             Function at equally-spaced coordinates        
         """
-        F = util.checkerboard(cp.fft.fftn(
-            util.checkerboard(G)), inverse=True)
+        F = util.checkerboard(cp.fft.ifftn(
+            util.checkerboard(G), norm='ortho'), inverse=True)
         F = F[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
               2:3*self.n//2] / ((2 * self.n)**3 * self.kernel)
         return F
