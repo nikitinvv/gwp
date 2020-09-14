@@ -27,94 +27,87 @@ class Usfft():
         self.kernel = kernel
         self.cons = cons
 
-    def gather(self, Fe, x, F):
-        """Gather F from the regular grid.
+    def gather(self, Fe, x, l):
+        """Gather F from the regular grid Fe.
         Parameters
         ----------
-        Fe : [N1,N2,N3] complex64
+        Fe : [l[0],l[1],l[2]] complex64
             Function at equally spaced frequencies.
         x : (K, 3) float32
             Non-uniform frequencies.
-        F : (K, ) complex64
-            Init values at the non-uniform frequencies.
+        l : (3, ) int32
+            Shape of the global grid.
         Returns
         -------
         F : (K, ) complex64
             Values at the non-uniform frequencies.
         """
-        n = Fe.shape
-        m = self.m
-        
-        # skip points that are too far from the global grid
-        ell = (np.round(cp.array(n) * x) ).astype(np.int32)  # nearest grid to x
-        cond_out = cp.where((ell[:, 0]+n[0]//2+m >= 0) *\
-            (ell[:, 1]+n[1]//2+m >= 0) *\
-            (ell[:, 2]+n[2]//2+m >= 0) *\
-            (ell[:, 0]+n[0]//2-m < n[0]) *\
-            (ell[:, 1]+n[1]//2-m < n[1]) *\
-            (ell[:, 2]+n[2]//2-m < n[2]))[0]
-        ell = ell[cond_out]
-        x = x[cond_out]
-        Fc = F[cond_out]
-        
+        # nearest grid to x
+        ell = (np.round(cp.array(l) * x) ).astype(np.int32) 
+        F = cp.zeros(x.shape[0],dtype='complex64')
         # gathering over 3 axes
-        for i0 in range(-m, m):
-            id0 = (n[0]//2 + ell[:, 0] + i0)
-            cond0 = (id0 >= 0)*(id0 < n[0])  # check index z
-            for i1 in range(-m, m):
-                id1 = (n[1]//2 + ell[:, 1] + i1)
-                cond1 = (id1 >= 0)*(id1 < n[1])  # check index y
-                for i2 in range(-m, m):
-                    id2 = (n[2]//2 + ell[:, 2] + i2)
-                    cond2 = (id2 >= 0)*(id2 < n[2])  # check index x
+        for i0 in range(-self.m, self.m):
+            id0 = l[0]//2 + ell[:, 0] + i0         
+            # check index z           
+            cond0 = (id0 >= 0)*(id0 < l[0]) 
+            for i1 in range(-self.m, self.m):
+                id1 = l[1]//2 + ell[:, 1] + i1
+                # check index y
+                cond1 = (id1 >= 0)*(id1 < l[1])  
+                for i2 in range(-self.m, self.m):
+                    id2 = l[2]//2 + ell[:, 2] + i2
+                    # check index x
+                    cond2 = (id2 >= 0)*(id2 < l[2])  
                     # take index inside the global grid
                     cond = cp.where(cond0*cond1*cond2)[0]
+                    # cond = cp.arange(ell.shape[0])
                     # compute weights
-                    delta0 = ((ell[cond, 0] + i0) / (n[0]) - x[cond, 0])**2
-                    delta1 = ((ell[cond, 1] + i1) / (n[1]) - x[cond, 1])**2
-                    delta2 = ((ell[cond, 2] + i2) / (n[2]) - x[cond, 2])**2
+                    delta0 = ((ell[cond, 0] + i0) / (l[0]) - x[cond, 0])
+                    delta1 = ((ell[cond, 1] + i1) / (l[1]) - x[cond, 1])
+                    delta2 = ((ell[cond, 2] + i2) / (l[2]) - x[cond, 2])
+                    #compensate for the grid change (2n->l)
+                    delta0 *= (l[0]/(2*self.n))
+                    delta1 *= (l[1]/(2*self.n))
+                    delta2 *= (l[2]/(2*self.n))
+                    
                     Fkernel = self.cons[0] * \
-                        cp.exp(self.cons[1] * (delta0 + delta1 + delta2))
-                    # gather
-                    Fc[cond] += Fe[id0[cond], id1[cond], id2[cond]] * Fkernel
-        F[cond_out] += Fc
+                        cp.exp(self.cons[1] * (delta0**2 + delta1**2 + delta2**2))
+                    # gather          
+                    F[cond] += Fkernel*Fe[id0[cond], id1[cond], id2[cond]]* Fkernel
         return F
         
     def compfft(self, f):
-        """Compesantion for smearing, followed by FFT
+        """Compesantion for smearing, followed by inplace FFT
         Parameters
         ----------
         f : [n] * 3 complex64
             Function at equally-spaced coordinates
         Return
         ------
-        Fe : [2 * n] * 3 complex64
+        fe : [2 * n] * 3 complex64
             Fourier transform at equally-spaced frequencies
         """
 
         fe = cp.zeros([2 * self.n] * 3, dtype="complex64")
         fe[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
             2:3*self.n//2] = f / ((2 * self.n)**3 * self.kernel)
-        Fe = util.checkerboard(cp.fft.fftn(
+        fe = util.checkerboard(cp.fft.fftn(
             util.checkerboard(fe), norm='ortho'), inverse=True)
-        return Fe
+        return fe
 
-    def ifftcomp(self, G):
-        """FFT followed by compesantion for smearing
+    def ifftcomp(self, F):
+        """Inplace FFT followed by compesantion for smearing
         Parameters
         ----------
-        Fe : [2 * n] * 3 complex64
+        F : [2 * n] * 3 complex64
             Fourier transform at equally-spaced frequencies
         Return
         ------            
-        f : [n] * 3 complex64
+        F : [n] * 3 complex64
             Function at equally-spaced coordinates        
         """
         F = util.checkerboard(cp.fft.ifftn(
-            util.checkerboard(G), norm='ortho'), inverse=True)
+            util.checkerboard(F), norm='ortho'), inverse=True)
         F = F[self.n//2:3*self.n//2, self.n//2:3*self.n//2, self.n //
               2:3*self.n//2] / ((2 * self.n)**3 * self.kernel)
         return F
-
-    # def _delta(self, l, i, x):
-    #     return ((l + i).astype('float32') / (2 * self.n) - x)**2

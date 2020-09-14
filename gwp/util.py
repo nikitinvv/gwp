@@ -32,7 +32,6 @@ def rotate(x, leb, reverse=False):
                   [leb[2], 0.0, leb[0]*np.sin(phi)-leb[1]*np.cos(phi)]])
     if(reverse):
         R = R.swapaxes(0, 1)
-
     xr = cp.zeros(x.shape, dtype='float32')
     xr[:, 2] = R[0, 0]*x[:, 2] + R[0, 1]*x[:, 1] + R[0, 2]*x[:, 0]
     xr[:, 1] = R[1, 0]*x[:, 2] + R[1, 1]*x[:, 1] + R[1, 2]*x[:, 0]
