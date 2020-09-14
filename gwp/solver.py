@@ -5,6 +5,9 @@ from gwp import usfft
 
 
 class Solver():
+    """Provides forward and adjoint operators for Gaussian Wave-packet (GWP) decompositon on
+    GPU with using cupy library. For details see http://www.mathnet.ru/links/f0cbda0c8155c9c4d0ff6dd015c9ec78/vmp881.pdf
+    """
 
     def __init__(self, n, nangles, alpha, beta, eps):
         # init box parameters for covering the spectrum (see paper)
