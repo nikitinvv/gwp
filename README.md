@@ -1,5 +1,5 @@
 # gwp
-Forward and adjoint operators for Gaussian wave-packet decomposition
+Forward and adjoint operators for Gaussian wave-packet decomposition on GPU
 
 ## Installation
 python setup.py install
@@ -9,6 +9,7 @@ cupy - for GPU acceleration of linear algebra operations in iterative schemes.
 
 dxchange - read/write tiff fiels
 
+Install dependencies: conda install -c conda-forge cupy  dxchange
 ## Examples
 See examples/:
 
