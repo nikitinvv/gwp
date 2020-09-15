@@ -21,3 +21,4 @@ many_gwp.py - construct many gwp in one image for given angles and box levels by
 
 perf.py - timing for the forward and adjoint gwp operators
 
+synthetic.py - example of synthetic data decomposition
