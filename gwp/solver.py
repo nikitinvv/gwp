@@ -18,9 +18,9 @@ class Solver():
         if K == 0:
             nf = np.array([0.5])
             K = 1
-        xi_cent = np.int32(n/nf/(np.pi))
+        xi_cent = np.int32(n/nf/(np.pi))# /(2*np.pi)?
         
-        lam1 = 4*np.log(2)*(xi_cent*alpha)*(xi_cent*alpha)
+        lam1 = 4*np.log(2)*(xi_cent/alpha)*(xi_cent/alpha)
         lam2 = lam1/(beta*beta)
         lam3 = lam1/(beta*beta)
         lambda1 = np.pi**2/lam1
